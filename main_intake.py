@@ -1,8 +1,12 @@
 from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse
-import sqlite3, datetime, os
+import sqlite3, datetime, os, requests
+
 app = FastAPI(title="FJ INTAKE")
 DB = "fj_erp.db"
+# Your storage live URL
+STORAGE_URL = "https://fj-polokwane-storage.onrender.com/api/move_internal"
+
 def db():
     conn = sqlite3.connect(DB)
     conn.execute("CREATE TABLE IF NOT EXISTS products (sku TEXT PRIMARY KEY, name TEXT, qty INTEGER DEFAULT 0, price REAL DEFAULT 0)")
@@ -15,15 +19,15 @@ def db():
 def home():
     return """
     <html><head><meta name=viewport content="width=device-width"><style>body{font-family:Arial;padding:15px;background:#e8f5e9}.card{background:white;padding:20px;border-radius:12px}button{background:#2e7d32;color:white;padding:12px;border:none;border-radius:8px;width:100%;font-weight:bold}input{padding:10px;width:95%;margin:5px}</style></head><body>
-    <h1 style="color:#2e7d32">🟢 FJ INTAKE - Gate Receiving (Veldspaat)</h1>
+    <h1 style="color:#2e7d32">🟢 FJ INTAKE - Gate Receiving (Veldspaat) - LIVE LINKED</h1>
     <div class=card><h3>1. Receive Truck - SCAN IN</h3>
     <form action=/api/move method=post>
     <input name=sku placeholder="SKU e.g. TV-55-SAMSUNG" required>
     <input name=bin placeholder="BIN e.g. PLK-A-01-01" required>
     <input name=qty type=number value=1 required>
     <input name=ref placeholder="GRN / Delivery Note">
-    <button>RECEIVE STOCK -> QUEUED_FOR_SAP</button></form>
-    <p>Employee: Security / Receiving ONLY</p></div></body></html>"""
+    <button>RECEIVE STOCK -> SEND TO STORAGE</button></form>
+    <p>Employee: Security / Receiving ONLY - Auto-sync to Storage</p></div></body></html>"""
 
 @app.post("/api/move")
 def move(sku:str=Form(...), bin:str=Form(...), qty:int=Form(...), ref:str=Form("")):
@@ -31,4 +35,20 @@ def move(sku:str=Form(...), bin:str=Form(...), qty:int=Form(...), ref:str=Form("
     conn.execute("UPDATE products SET qty=qty+? WHERE sku=?",(qty,sku))
     conn.execute("INSERT INTO movements(sku,bin,qty,type,ref,timestamp) VALUES (?,?,?,?,?,?)",(sku,bin,qty,"IN",ref or "QUEUED_FOR_SAP",datetime.datetime.now().isoformat()))
     conn.commit(); conn.close()
+    
+    # Auto-forward to storage - THIS IS THE FIX
+    try:
+        requests.post(STORAGE_URL, json={"sku":sku,"bin":bin,"qty":qty,"ref":ref}, timeout=5)
+    except:
+        pass
+
     return HTMLResponse("<script>alert('IN OK - Sent to Storage');window.location='/'</script>")
+
+@app.post("/api/move_internal")
+def move_internal(data: dict):
+    # For receiving from other service
+    conn=db()
+    conn.execute("INSERT OR IGNORE INTO products(sku,name) VALUES (?,?)",(data['sku'],data['sku']))
+    conn.execute("UPDATE products SET qty=qty+? WHERE sku=?",(data['qty'],data['sku']))
+    conn.commit(); conn.close()
+    return {"ok":True}
