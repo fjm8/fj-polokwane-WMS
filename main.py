@@ -1,116 +1,147 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
-import sqlite3, datetime, os
+from fastapi.middleware.cors import CORSMiddleware
+import sqlite3
+import requests
+import uuid
+from datetime import datetime
+import random
 
-app = FastAPI(title="FJ-ERP SA v1 - Polokwane")
-
+app = FastAPI(title="FJ INTAKE - Unique Code Generator")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 DB = "fj_erp.db"
+STORAGE_URL = "https://fj-polokwane-storage.onrender.com/api/move_internal"
 
-def db():
+def init():
     conn = sqlite3.connect(DB)
-    conn.execute("CREATE TABLE IF NOT EXISTS products (sku TEXT PRIMARY KEY, name TEXT, cost REAL DEFAULT 0, price REAL DEFAULT 0, qty INTEGER DEFAULT 0)")
-    conn.execute("CREATE TABLE IF NOT EXISTS locations (bin TEXT PRIMARY KEY)")
-    conn.execute("CREATE TABLE IF NOT EXISTS movements (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, bin TEXT, qty INTEGER, type TEXT, ref TEXT, timestamp TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT, balance REAL DEFAULT 0)")
-    conn.execute("CREATE TABLE IF NOT EXISTS invoices (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER, total REAL, vat REAL, grand_total REAL, status TEXT, timestamp TEXT)")
-    conn.execute("CREATE TABLE IF NOT EXISTS invoice_items (id INTEGER PRIMARY KEY AUTOINCREMENT, invoice_id INTEGER, sku TEXT, qty INTEGER, price REAL)")
-    # seed
-    if conn.execute("SELECT COUNT(*) FROM locations").fetchone()[0]==0:
-        for b in ["PLK-A-01-01","PLK-A-01-02","PLK-B-02-01","RECEIVING","DISPATCH"]:
-            conn.execute("INSERT INTO locations VALUES (?)",(b,))
-        conn.execute("INSERT OR IGNORE INTO products VALUES ('TV-55-SAMSUNG','Samsung 55 TV',8000,11999,10)")
-        conn.execute("INSERT OR IGNORE INTO customers VALUES (1,'Cash Sale Polokwane','015 000 0000',0)")
-        conn.commit()
-    return conn
+    c = conn.cursor()
+    # New table: Every single item has unique code
+    c.execute("""CREATE TABLE IF NOT EXISTS inventory_items 
+                 (unique_code TEXT PRIMARY KEY, sku TEXT, name TEXT, bin TEXT, status TEXT, time TEXT, durability TEXT, weight INTEGER)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS grn_log (grn TEXT PRIMARY KEY, time TEXT)""")
+    conn.commit()
+    conn.close()
+init()
 
-HTML = """
-<html><head><meta name=viewport content="width=device-width,initial-scale=1"><title>FJ-ERP SA</title>
-<style>body{font-family:Arial;padding:15px;background:#f5f5f5}.card{background:white;padding:15px;border-radius:10px;margin-bottom:15px;box-shadow:0 2px 5px #0001}
-h1{color:#d00} input,select,button{padding:10px;margin:5px;width:95%} button{background:#d00;color:white;border:none;border-radius:5px;font-weight:bold}
-.tab{padding:10px;background:#222;color:white;display:inline-block;border-radius:5px;margin-right:5px;cursor:pointer}.active{background:#d00}
-table{width:100%;border-collapse:collapse} td,th{border:1px solid #ddd;padding:8px;font-size:13px}</style>
-<script>
-function show(t){document.querySelectorAll('.sec').forEach(s=>s.style.display='none');document.getElementById(t).style.display='block'}
-</script></head><body>
-<h1>FJ-ERP SA v1 - Veldspaat DC</h1>
-<div><span class=tab onclick="show('wms')">WMS Scan</span><span class=tab onclick="show('pos')">POS / Invoice</span><span class=tab onclick="show('stock')">Stock</span></div>
-
-<div id=wms class="sec card">
-<h3>1. Scan Stock Movement (Your old WMS)</h3>
-<form action=/api/move method=post>
-<select name=type><option>IN</option><option>OUT</option></select>
-<input name=sku placeholder="SKU e.g. TV-55-SAMSUNG" required>
-<input name=bin placeholder="BIN e.g. PLK-A-01-01" required>
-<input name=qty type=number value=1 required>
-<input name=ref placeholder="Ref / GRN / SAP Doc">
-<button>POST MOVEMENT -> QUEUED_FOR_SAP</button>
-</form>
-</div>
-
-<div id=pos class="sec card" style="display:none">
-<h3>2. New Sale - Invoice (SA VAT 15%)</h3>
-<form action=/api/invoice method=post>
-<input name=customer_phone placeholder="Customer Phone - e.g. 082..." required>
-<input name=sku placeholder="SKU" required>
-<input name=qty type=number value=1 required>
-<button>CREATE INVOICE + AUTO STOCK OUT</button>
-</form>
-<p>Flow: Invoice created -> Stock reduced -> VAT 15% calculated -> Ready for Yoco/Pay</p>
-</div>
-
-<div id=stock class="sec card" style="display:none">
-<h3>3. Live Stock & Invoices</h3>
-{stock_table}
-<hr>
-{invoice_table}
-</div>
-
-</body></html>
-"""
+def make_unique_code(sku):
+    # Format: SKU-DATE-4RANDOM e.g. TV-55-20251015-A7K9
+    date = datetime.now().strftime("%Y%m%d")
+    rand = str(uuid.uuid4())[:4].upper()
+    return f"{sku}-{date}-{rand}"
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    conn=db()
-    stock = conn.execute("SELECT sku,name,qty,price FROM products").fetchall()
-    inv = conn.execute("SELECT id,total,vat,grand_total,status,timestamp FROM invoices ORDER BY id DESC LIMIT 10").fetchall()
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT unique_code, sku, name, bin, status, time FROM inventory_items ORDER BY time DESC LIMIT 100")
+    items = c.fetchall()
     conn.close()
-    stock_html = "<table><tr><th>SKU</th><th>Name</th><th>Qty</th><th>Price</th></tr>" + "".join([f"<tr><td>{s[0]}</td><td>{s[1]}</td><td>{s[2]}</td><td>R{s[3]}</td></tr>" for s in stock]) + "</table>"
-    inv_html = "<table><tr><th>Inv#</th><th>Total</th><th>VAT</th><th>Grand</th><th>Status</th></tr>" + "".join([f"<tr><td>{i[0]}</td><td>R{i[1]}</td><td>R{i[2]}</td><td>R{i[3]}</td><td>{i[4]}</td></tr>" for i in inv]) + "</table>"
-    return HTML.replace("{stock_table}",stock_html).replace("{invoice_table}",inv_html)
 
-@app.post("/api/move")
-def move(sku:str=Form(...), bin:str=Form(...), qty:int=Form(...), type:str=Form(...), ref:str=Form("")):
-    conn=db()
-    conn.execute("INSERT OR IGNORE INTO products(sku,name) VALUES (?,?)",(sku,sku))
-    if type=="IN":
-        conn.execute("UPDATE products SET qty=qty+? WHERE sku=?",(qty,sku))
-    else:
-        conn.execute("UPDATE products SET qty=qty-? WHERE sku=?",(qty,sku))
-    conn.execute("INSERT INTO movements(sku,bin,qty,type,ref,timestamp) VALUES (?,?,?,?,?,?)",(sku,bin,qty,type,ref or "QUEUED_FOR_SAP",datetime.datetime.now().isoformat()))
-    conn.commit(); conn.close()
-    return HTMLResponse("<script>alert('Movement OK - QUEUED_FOR_SAP');window.location='/'</script>")
+    rows = ""
+    for code, sku, name, bin_loc, status, time in items:
+        # QR Code API for scanning
+        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=80x80&data={code}"
+        rows += f"<tr><td><b>{code}</b><br><img src='{qr_url}'><br><small>{sku}</small></td><td>{name}</td><td>{bin_loc}</td><td>{status}</td><td><a href='/scan/{code}' target='_blank'>View/Scan</a></td></tr>"
 
-@app.post("/api/invoice")
-def invoice(customer_phone:str=Form(...), sku:str=Form(...), qty:int=Form(...)):
-    conn=db()
-    prod = conn.execute("SELECT price FROM products WHERE sku=?",(sku,)).fetchone()
-    price = prod[0] if prod else 11999
-    total = price*qty
-    vat = round(total*0.15,2)
-    grand = total+vat
-    # customer
-    cust = conn.execute("SELECT id FROM customers WHERE phone=?",(customer_phone,)).fetchone()
-    if not cust:
-        conn.execute("INSERT INTO customers(name,phone) VALUES (?,?)",(customer_phone,customer_phone))
-        cust_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    else: cust_id=cust[0]
-    conn.execute("INSERT INTO invoices(customer_id,total,vat,grand_total,status,timestamp) VALUES (?,?,?,?,?,?)",(cust_id,total,vat,grand,"PAID",datetime.datetime.now().isoformat()))
-    inv_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.execute("INSERT INTO invoice_items(invoice_id,sku,qty,price) VALUES (?,?,?,?)",(inv_id,sku,qty,price))
-    conn.execute("UPDATE products SET qty=qty-? WHERE sku=?",(qty,sku))
-    conn.execute("INSERT INTO movements(sku,bin,qty,type,ref,timestamp) VALUES (?,?,?,?,?,?)",(sku,"DISPATCH",qty,"OUT",f"INV-{inv_id}",datetime.datetime.now().isoformat()))
-    conn.commit(); conn.close()
-    return HTMLResponse(f"<script>alert('Invoice INV-{inv_id} Created: R{grand} incl VAT');window.location='/'</script>")
+    return f"""
+    <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+    <script src='https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js'></script>
+    <style>body{{font-family:sans-serif;padding:12px;font-size:12px}} table{{width:100%;border-collapse:collapse}} td,th{{border:1px solid #ccc;padding:6px}} .head{{background:#2e7d32;color:white;padding:12px}} input,select{{padding:8px;width:100%;margin:4px 0}} button{{background:#2e7d32;color:white;border:none;padding:10px;border-radius:5px;width:100%}} .scan-box{{background:#fff3e0;padding:10px;border:2px dashed #ff9800;margin:10px 0}}</style></head><body>
+    <div class='head'><h2>🟢 INTAKE - Unique Scannable Codes</h2><p>Every single product gets its own unique code for scanning</p></div>
 
-@app.get("/health")
-def health(): return {"status":"FJ-ERP SA Live","modules":["WMS","POS","VAT","SAP-Queue"]}
+    <div class='scan-box'>
+    <h3>SCAN PRODUCT HERE</h3>
+    <input id='scanInput' placeholder='Scan barcode / QR here (unique code)' onkeypress="if(event.key==='Enter'){{window.location.href='/scan/'+this.value}}">
+    <button onclick="window.location.href='/scan/'+document.getElementById('scanInput').value">Identify Product</button>
+    </div>
+
+    <h3>Receive New Stock (Gate)</h3>
+    <form method='post' action='/receive'>
+        <input name='sku' placeholder='SKU e.g. TV-55-SAMSUNG' required>
+        <input name='name' placeholder='Product Name e.g. Samsung 55 inch TV' required>
+        <input name='qty' type='number' placeholder='Qty e.g. 5' required>
+        <input name='bin' placeholder='BIN e.g. PLK-A-01-01' value='PLK-A-01-01' required>
+        <select name='durability'><option value='Durable'>Durable</option><option value='Fragile'>Fragile</option></select>
+        <input name='weight' type='number' placeholder='Weight per item kg' value='10'>
+        <input name='grn' placeholder='GRN Number' required>
+        <button type='submit'>Generate { '{' } qty { '}' } Unique Scannable Codes</button>
+    </form>
+
+    <h3>Last 100 Items Generated - Each has UNIQUE code (Print labels from here)</h3>
+    <table><tr><th>Unique Code / QR + Barcode</th><th>Name</th><th>BIN</th><th>Status</th><th>Action</th></tr>{rows}</table>
+
+    <script>JsBarcode('.barcode').init();</script>
+    </body></html>
+    """
+
+@app.post("/receive")
+def receive(sku: str = Form(...), name: str = Form(...), qty: int = Form(...), bin: str = Form(...), grn: str = Form(...), durability: str = Form(...), weight: int = Form(...)):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO grn_log VALUES (?,?)", (grn, datetime.now().isoformat()))
+    
+    generated = []
+    for _ in range(qty):
+        unique_code = make_unique_code(sku)
+        # Ensure unique
+        while True:
+            c.execute("SELECT unique_code FROM inventory_items WHERE unique_code=?", (unique_code,))
+            if not c.fetchone():
+                break
+            unique_code = make_unique_code(sku)
+        
+        c.execute("INSERT INTO inventory_items (unique_code, sku, name, bin, status, time, durability, weight) VALUES (?,?,?,?,?,?,?,?)",
+                  (unique_code, sku, name, bin, "IN_BIN", datetime.now().isoformat(), durability, weight))
+        generated.append(unique_code)
+
+        # Forward to STORAGE as individual item
+        try:
+            requests.post(STORAGE_URL, json={"unique_code": unique_code, "sku": sku, "name": name, "qty": 1, "bin": bin, "weight": weight, "durability": durability}, timeout=2)
+        except:
+            pass
+
+    conn.commit()
+    conn.close()
+    
+    codes_html = "<br>".join([f"{code} <img src='https://api.qrserver.com/v1/create-qr-code/?size=60x60&data={code}'>" for code in generated])
+    return HTMLResponse(f"<html><body><h2>Generated {qty} Unique Codes for {sku}</h2><p>{codes_html}</p><br><a href='/'>Back to INTAKE</a><script>setTimeout(()=>window.location.href='/', 5000)</script></body></html>")
+
+@app.get("/scan/{unique_code}", response_class=HTMLResponse)
+def scan(unique_code: str):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT unique_code, sku, name, bin, status, time, durability, weight FROM inventory_items WHERE unique_code=?", (unique_code,))
+    item = c.fetchone()
+    conn.close()
+    if not item:
+        return HTMLResponse(f"<h2>Code {unique_code} NOT FOUND</h2><a href='/'>Back</a>")
+    
+    code, sku, name, bin_loc, status, time, dur, weight = item
+    qr = f"https://api.qrserver.com/v1/create-qr-code/?size=200x200&data={code}"
+    return f"""
+    <html><head><meta name='viewport' content='width=device-width, initial-scale=1'><style>body{{font-family:sans-serif;padding:20px;text-align:center}}.card{{border:3px solid #2e7d32;padding:20px;border-radius:10px;max-width:400px;margin:auto}}</style></head><body>
+    <div class='card'>
+    <h2>✅ PRODUCT IDENTIFIED</h2>
+    <img src='{qr}'><br><br>
+    <h1 style='background:yellow;padding:10px'>{code}</h1>
+    <p><b>SKU:</b> {sku}</p>
+    <p><b>Name:</b> {name}</p>
+    <p><b>BIN:</b> {bin_loc}</p>
+    <p><b>Status:</b> {status}</p>
+    <p><b>Type:</b> {dur} / {weight}kg</p>
+    <p><b>Received:</b> {time}</p>
+    <hr>
+    <p>This unique code belongs to ONE specific item. If there are 10x {sku}, this is 1 of 10.</p>
+    <p>You can now assign THIS specific item to a specific shelf.</p>
+    <a href='/'>Back to INTAKE</a>
+    </div></body></html>
+    """
+
+@app.get("/api/item/{{unique_code}}")
+def api_item(unique_code: str):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT * FROM inventory_items WHERE unique_code=?", (unique_code,))
+    item = c.fetchone()
+    conn.close()
+    return {"item": item}
