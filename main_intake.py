@@ -1,54 +1,48 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
-import sqlite3, datetime, os, requests
+from fastapi.middleware.cors import CORSMiddleware
+import sqlite3, requests, uuid
+from datetime import datetime
 
-app = FastAPI(title="FJ INTAKE")
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 DB = "fj_erp.db"
-# Your storage live URL
 STORAGE_URL = "https://fj-polokwane-storage.onrender.com/api/move_internal"
 
-def db():
+def init():
     conn = sqlite3.connect(DB)
-    conn.execute("CREATE TABLE IF NOT EXISTS products (sku TEXT PRIMARY KEY, name TEXT, qty INTEGER DEFAULT 0, price REAL DEFAULT 0)")
-    conn.execute("CREATE TABLE IF NOT EXISTS movements (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, bin TEXT, qty INTEGER, type TEXT, ref TEXT, timestamp TEXT)")
-    conn.execute("INSERT OR IGNORE INTO products VALUES ('TV-55-SAMSUNG','Samsung 55 TV',10,11999)")
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS inventory_items (unique_code TEXT PRIMARY KEY, sku TEXT, name TEXT, bin TEXT, status TEXT, time TEXT)")
     conn.commit()
-    return conn
+    conn.close()
+init()
+
+def make_code(sku):
+    return f"{sku}-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """
-    <html><head><meta name=viewport content="width=device-width"><style>body{font-family:Arial;padding:15px;background:#e8f5e9}.card{background:white;padding:20px;border-radius:12px}button{background:#2e7d32;color:white;padding:12px;border:none;border-radius:8px;width:100%;font-weight:bold}input{padding:10px;width:95%;margin:5px}</style></head><body>
-    <h1 style="color:#2e7d32">🟢 FJ INTAKE - Gate Receiving (Veldspaat) - LIVE LINKED</h1>
-    <div class=card><h3>1. Receive Truck - SCAN IN</h3>
-    <form action=/api/move method=post>
-    <input name=sku placeholder="SKU e.g. TV-55-SAMSUNG" required>
-    <input name=bin placeholder="BIN e.g. PLK-A-01-01" required>
-    <input name=qty type=number value=1 required>
-    <input name=ref placeholder="GRN / Delivery Note">
-    <button>RECEIVE STOCK -> SEND TO STORAGE</button></form>
-    <p>Employee: Security / Receiving ONLY - Auto-sync to Storage</p></div></body></html>"""
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT unique_code, sku, name, bin, status FROM inventory_items ORDER BY time DESC LIMIT 50")
+    items = c.fetchall()
+    conn.close()
+    rows = "".join([f"<tr><td><b>{i[0]}</b><br><img src='https://api.qrserver.com/v1/create-qr-code/?size=60x60&data={i[0]}'></td><td>{i[1]}<br>{i[2]}</td><td>{i[3]}</td><td>{i[4]}</td></tr>" for i in items])
+    return f"""
+    <html><head><meta name='viewport' content='width=device-width'><style>body{{font-family:sans-serif;padding:10px;font-size:13px}} table{{width:100%;border-collapse:collapse}} td{{border:1px solid #ccc;padding:6px}}.head{{background:green;color:white;padding:10px}} input{{width:100%;padding:8px;margin:4px 0}} button{{width:100%;padding:10px;background:green;color:white;border:none}}</style></head><body>
+    <div class='head'><h3>INTAKE - Unique Code Generator</h3></div>
+    <form method='post' action='/receive'><input name='sku' placeholder='SKU e.g. TV-55' required><input name='name' placeholder='Product Name e.g. Samsung TV' required><input name='qty' type='number' placeholder='Quantity e.g. 5' required><input name='bin' value='PLK-A-01-01' required><input name='grn' placeholder='GRN No' required><button>Generate Unique Codes</button></form>
+    <h3>Generated Codes (Each Item = 1 Code)</h3><table><tr><th>Unique Code</th><th>Product</th><th>BIN</th><th>Status</th></tr>{rows}</table></body></html>"""
 
-@app.post("/api/move")
-def move(sku:str=Form(...), bin:str=Form(...), qty:int=Form(...), ref:str=Form("")):
-    conn=db(); conn.execute("INSERT OR IGNORE INTO products(sku,name) VALUES (?,?)",(sku,sku))
-    conn.execute("UPDATE products SET qty=qty+? WHERE sku=?",(qty,sku))
-    conn.execute("INSERT INTO movements(sku,bin,qty,type,ref,timestamp) VALUES (?,?,?,?,?,?)",(sku,bin,qty,"IN",ref or "QUEUED_FOR_SAP",datetime.datetime.now().isoformat()))
-    conn.commit(); conn.close()
-    
-    # Auto-forward to storage - THIS IS THE FIX
-    try:
-        requests.post(STORAGE_URL, json={"sku":sku,"bin":bin,"qty":qty,"ref":ref}, timeout=5)
-    except:
-        pass
-
-    return HTMLResponse("<script>alert('IN OK - Sent to Storage');window.location='/'</script>")
-
-@app.post("/api/move_internal")
-def move_internal(data: dict):
-    # For receiving from other service
-    conn=db()
-    conn.execute("INSERT OR IGNORE INTO products(sku,name) VALUES (?,?)",(data['sku'],data['sku']))
-    conn.execute("UPDATE products SET qty=qty+? WHERE sku=?",(data['qty'],data['sku']))
-    conn.commit(); conn.close()
-    return {"ok":True}
+@app.post("/receive")
+def receive(sku: str = Form(...), name: str = Form(...), qty: int = Form(...), bin: str = Form(...), grn: str = Form(...)):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    for _ in range(qty):
+        code = make_code(sku)
+        c.execute("INSERT INTO inventory_items VALUES (?,?,?,?,?,?)", (code, sku, name, bin, "IN_BIN", datetime.now().isoformat()))
+        try: requests.post(STORAGE_URL, json={"unique_code": code, "sku": sku, "name": name, "bin": bin}, timeout=2)
+        except: pass
+    conn.commit()
+    conn.close()
+    return HTMLResponse(f"<script>alert('Generated {qty} unique codes for {sku}'); window.location.href='/';</script>")
