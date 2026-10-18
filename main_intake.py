@@ -63,12 +63,12 @@ def receive(sku: str = Form(...), name: str = Form(...), qty: int = Form(...), b
         conn.commit()
         conn.close()
 
-        # Try to push to storage - if it fails, still ok, intake saved
+        # Background transfer to storage - no link shown to user
         try:
             requests.post(STORAGE_URL, json=batch, timeout=8)
         except:
             pass
 
-        return HTMLResponse(f"<html><body><h3>Created {qty} items OK</h3><p>SKU: {sku}</p><a href='/'>Back to Intake</a><br><br><a href='https://fj-polokwane-storage.onrender.com' target='_blank'>Go to Storage</a></body></html>")
+        return HTMLResponse(f"<html><body style='font-family:sans-serif;padding:20px'><h3>Created {qty} items OK</h3><p>SKU: {sku}</p><a href='/'>Back to Intake</a></body></html>")
     except Exception as e:
         return HTMLResponse(f"<html><body><h3>Error: {str(e)}</h3><a href='/'>Back</a></body></html>", status_code=500)
