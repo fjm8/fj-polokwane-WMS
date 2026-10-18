@@ -12,7 +12,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 DB = "fj.db"
 
 # Your storage service URL - CHANGE if different
-STORAGE_URL = "https://fj-polokwane-wms-1.onrender.com/api/move_batch"
+STORAGE_URL = "https://fj-polokwane-storage.onrender.com/api/move_batch"
 
 def init():
     conn = sqlite3.connect(DB)
